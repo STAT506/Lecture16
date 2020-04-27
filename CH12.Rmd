@@ -1,0 +1,289 @@
+---
+title: "Lecture 15: Gelman Hill Ch 12 + Ch 13"
+output:
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+library(tidyverse) 
+library(arm)
+library(knitr)
+library(kableExtra)
+library(lme4)
+library(rstan)
+library(rstanarm)
+```
+
+
+### Motivating Dataset
+
+Recall the housing dataset from King County, WA that contains sales prices of homes across the Seattle area. Below we see the relationship between sales price and the size of the home across several zipcodes.
+\vfill
+
+```{r, message = F}
+seattle <- read_csv("http://math.montana.edu/ahoegh/teaching/stat408/datasets/SeattleHousing.csv")
+
+seattle <- seattle %>% mutate(zipcode = factor(zipcode),
+                              sqft_living_sq = sqft_living ^2,
+                              sqft1000 = sqft_living / 1000,
+                              price100000 = price / 100000,
+                              scale_sqft = scale(sqft_living))
+```
+
+```{r, echo = F}
+seattle %>% 
+  ggplot(aes(y = price100000, x = sqft1000, color = zipcode)) +
+  geom_point() + geom_smooth(method = 'lm') + theme_bw() +
+  facet_wrap(.~zipcode) + theme(legend.position = "none") +
+  ggtitle('Housing price vs. Living Square Feet in King County, WA') + 
+  ylab('Sales Price ($100,000)') + xlab('Living Space (1000 sqft)') + 
+  theme(axis.text.x = element_text(angle = 270, hjust = 1))
+```
+
+\vfill
+
+### Multilevel models
+
+\vfill
+\vfill
+
+\newpage
+
+### lmer
+
+One common approach for hierarchical models is to use the `lmer` function in the `lme4` package. Note that the hierarchical structure we have detailed can also be applied to GLMs using `glmer`.
+
+\vfill
+
+We need to denote what terms will vary by group.
+
+```{r, echo = T}
+lmer1 <- lmer(price ~ (1 | zipcode) , data = seattle)
+display(lmer1)
+coef(lmer1)
+```
+
+Note the coefficients for a specific group are defined as the fixed effect + the random effect.
+
+```{r, echo = T}
+fixef(lmer1)
+```
+The fixed effect here corresponds to $\mu_\alpha$. The standard component associated with the random effect can also be extracted.
+
+```{r, echo = T}
+sigma.hat(lmer1)$sigma$zipcode
+```
+
+\vfill
+\vfill
+
+\newpage
+
+\vfill
+\vfill
+
+```{r, echo = T}
+ranef(lmer1)
+```
+
+#### Summarizing the model
+
+```{r, echo = T}
+fixed_ci <- round(fixef(lmer1)['(Intercept)'] + c(-2,2) * se.fixef(lmer1)['(Intercept)'])
+```
+
+The 95% confidence interval for the fixed effects intercept is (`r prettyNum(fixed_ci[1],big.mark=",",scientific=FALSE)`, `r prettyNum(fixed_ci[2],big.mark=",",scientific=FALSE)`). This can be interpreted as the overall mean price of a house. Formally, this is more the mean of the group means.
+\vfill
+
+The 95% confidence intervals for the group effects (or deviations from the mean price) are:
+```{r}
+tibble(zipcode = rownames(ranef(lmer1)$zipcode),
+       lower = round(ranef(lmer1)$zipcode + -2 * se.ranef(lmer1)$zipcode), 
+       upper = round(ranef(lmer1)$zipcode + 2 * se.ranef(lmer1)$zipcode)) %>% 
+  kable(format.args = list(big.mark = ",")) %>% kable_styling()
+```
+
+\vfill
+
+A more useful way to summarize the data would be to create 95% confidence intervals for the overall intercept (fixed effect + random effect) for each group. In other words, we are now asking what are the plausible range of values for prices in each zipcode. To answer this question, we can use the `sim` function.
+
+```{r, echo = T}
+samples <- arm::sim(lmer1, n.sims = 1000)
+overall <- fixef(samples)
+group <- matrix(ranef(samples)$zipcode[,,1], nrow = 1000, ncol = ngrps(lmer1), byrow = F)
+group_totals <- group + matrix(overall, nrow = 1000, ncol = ngrps(lmer1))
+```
+
+\newpage
+```{r}
+group_int <- apply(group_totals, 2, quantile, probs = c(.025,.975) )
+tibble(zipcode = rownames(ranef(lmer1)$zipcode), lower =group_int[1,], upper = group_int[2,]) %>% 
+  ggplot(aes(x = lower, xend = upper, y = zipcode, yend = zipcode, color = zipcode)) + 
+  theme_bw()  + 
+  ggtitle('Mean housing price from multilevel model') +
+  xlab('Closing Price (USD)') + scale_x_continuous(breaks = c(500000, 1000000, 2000000),  
+      label = c("500k", "1 million", "2 million"), limits = c(0, 3000000)) + geom_segment() +
+  annotate('text', 2180000, 4.5, label ="Medina, WA") +
+  geom_point(inherit.aes = F, aes(y = zipcode, x = price, color = zipcode), data = seattle, size = .2) + geom_segment(color = 'black') + labs(caption = "note: black bars represent confidence interval for mean price \n dots represent individual houses, where those more expensive than $3 million are excluded ") + 
+  theme(legend.position = "none")
+```
+
+### Prediction
+
+\vfill
+\vfill
+
+```{r}
+sigma_alpha <- sigma.hat(lmer1)$sigma$zipcode
+mu_alpha <- fixef(lmer1)["(Intercept)"]
+alpha_samples <- rnorm(1000, mu_alpha, sigma_alpha)
+```
+
+
+```{r}
+sigma_y <- sigma.hat(lmer1)$sigma$data
+
+new_zip <- rnorm(1000, mean = alpha_samples, sd = sigma_y)
+```
+
+\newpage
+```{r}
+tibble(price = new_zip) %>% ggplot(aes(x = price))  + geom_histogram() + theme_bw() + 
+  ggtitle("Estimated price distribution for a new zipcode in King County, WA")
+```
+
+#### Adding Coefficients
+The model we have just outlined does not include any additional covariates. 
+
+\vfill
+
+
+```{r, echo = T}
+lmer2 <- lmer(price ~ scale_sqft + (1 |zipcode), data = seattle)
+
+display(lmer2)
+```
+
+\newpage
+
+\vfill
+\vfill
+\vfill
+\vfill
+
+Note: you may have to adjust the REML and optimizer options to achieve convergence
+```{r, echo = T, warning = T}
+lmer_nonconverge <- lmer(price ~ scale_sqft + (1 + scale_sqft|zipcode), data = seattle)
+```
+
+
+```{r, echo = T}
+lmer3 <- lmer(price ~ scale_sqft + (1 + scale_sqft|zipcode), data = seattle,
+      REML = FALSE)
+display(lmer3)
+```
+\vfill
+
+The fixed-effects or means of the group-level effects can be extracted.
+```{r, echo = T}
+fixef(lmer3)
+```
+
+Similarly, the variance of those group-level effects can also be obtained from the model.
+```{r, echo = T}
+sigma.hat(lmer3)$sigma
+```
+
+\newpage
+
+
+##### Final Connections
+
+\newpage
+
+
+### Hierarchical GLMs
+
+\vfill
+\vfill
+\vfill
+\vfill
+
+\vfill
+
+
+\vfill
+
+Similar to the `lmer` syntax, `glmer` can be be used for multilevel generalized-linear models.
+\vfill
+
+We will continue with the Seattle housing dataset and look to model whether a house has more than 2 bathrooms.
+```{r, echo = T}
+seattle <- seattle %>% mutate(more2 = bathrooms > 2, lessequal2 = bathrooms <= 2)
+```
+\vfill
+
+First look at the basic GLM with just an intercept.
+```{r, echo = T}
+glm(cbind(more2,lessequal2) ~ 1, data = seattle, family = binomial)
+seattle %>% summarise(mean(more2))
+```
+
+\newpage
+
+First look at the basic GLM with just an intercept.
+```{r, echo = T}
+glmer1 <- glmer(cbind(more2,lessequal2) ~ 1 + (1 | zipcode), data = seattle, family = binomial)
+display(glmer1)
+fixef(glmer1)
+ranef(glmer1)
+
+seattle %>% group_by(zipcode) %>% summarise(mean(more2))
+```
+
+\newpage
+
+Covariates can also be added that vary across the groups
+
+```{r, echo = T}
+glmer2 <- glmer(cbind(more2,lessequal2) ~ 1 + bedrooms + (1 + bedrooms | zipcode), 
+                data = seattle, family = binomial)
+display(glmer2)
+sigma.hat(glmer2)$sigma$zipcode
+fixef(glmer2)
+ranef(glmer2)
+```
+
+\newpage 
+
+### Stan & JAGS
+
+There are a few other approaches for fitting these type of models. Stan and JAGS are two common (Bayesian) approaches for fitting hierarchical models. Both have additional flexibility for specifying sampling models directly.
+
+Below is the syntax for a Stan model for hierarchical logistic regression.
+```{r, eval = F, echo = T}
+data {
+  int<lower=1> D;
+  int<lower=0> N;
+  int<lower=1> L;
+  int<lower=0,upper=1> y[N];
+  int<lower=1,upper=L> ll[N];
+  row_vector[D] x[N];
+}
+parameters {
+  real mu[D];
+  real<lower=0> sigma[D];
+  vector[D] beta[L];
+}
+model {
+  for (d in 1:D) {
+    mu[d] ~ normal(0, 100);
+    for (l in 1:L)
+      beta[l,d] ~ normal(mu[d], sigma[d]);
+  }
+  for (n in 1:N)
+    y[n] ~ bernoulli(inv_logit(x[n] * beta[ll[n]]));
+}
+```
+
